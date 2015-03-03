@@ -1,0 +1,4 @@
+Usage
+./azure_scripts status
+./azure_scripts remove INSTANCE_NAME
+./azure_scripts add INSTANCE_NAME
