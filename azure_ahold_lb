@@ -72,7 +72,7 @@ function count_inservice() {
        count=$(($count+1))
        echo "------Updating counter: $count"
       else
-       echoerr "------Port $port not present for vm $vm"
+       echoerr "------Port $port not present"
       fi
     done
   if [ $count -lt 2 ]; then
