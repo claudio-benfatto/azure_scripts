@@ -1,4 +1,4 @@
 Usage
-./azure_scripts status
-./azure_scripts remove INSTANCE_NAME
-./azure_scripts add INSTANCE_NAME
+./azure_ahold_lb status
+./azure_ahold_lb remove INSTANCE_NAME
+./azure_ahold_lb add INSTANCE_NAME

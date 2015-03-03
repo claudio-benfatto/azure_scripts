@@ -1,0 +1,218 @@
+#!/bin/bash
+###############################################################################
+
+red='\033[0;31m'
+green='\033[0;32m'
+NC='\033[0m' # No Color
+
+VMs="ahold-rc-eus-01 ahold-rc-eus-02"
+PORTS="80 443"
+MINIMUM_ACTIVE=2
+INSTANCE_NAME=$2
+OPERATION=$1
+WAIT_SEC=20
+LB_PORTS="80 443"
+
+function notify() {
+  echo $1 | /usr/bin/mailx -a "From: Rms Production <ubuntu@rms.foodity.com>" -s "[Ahold rms auto-publish] Notification" claudio.benfatto@constant.co
+}
+
+echored() { echo -e "${red}$@${NC}"; }
+echogreen() { echo -e "${green}$@${NC}"; }
+
+echoerr() { echored "$@"; notify "$@";}
+
+die() { echored "$@" 1>&2 ; exit 1; }
+
+############################
+#PRINT STATUS###########
+###########################
+function get_status() {
+  local vm
+  local port
+
+  echo "For vm in $VMs"
+  for vm in $VMs
+  do
+    echo "####################"
+    echo "####################"
+    echo "VM $vm"
+    echo "---For port in $PORTS..."
+    for port in $PORTS
+      do
+        azure vm endpoint list $vm | grep -E "\b\"?$port\"?\b" > /dev/null 2>&1
+      if [ $? -eq 0 ]; then
+        echogreen "------Port $port present"
+      else
+       echored "------Port $port not present for vm $vm"
+      fi
+    done
+  done
+}
+
+############################
+#COUNT IN SERVICE###########
+###########################
+function count_inservice() {
+  local count=0
+  local vm
+  local port
+  result=true
+  echo "For port in $PORTS..."
+  for port in $PORTS
+  do
+    echo "---Current port is $port"
+    count=0
+    echo "---For vm in $VMs..."
+    for vm in $VMs
+    do
+      echo "------Current vm is $vm..."
+      azure vm endpoint list $vm | grep -E "\b\"?$port\"?\b" > /dev/null 2>&1
+      if [ $? -eq 0 ]; then
+       count=$(($count+1))
+       echo "------Updating counter: $count"
+      else
+       echoerr "------Port $port not present for vm $vm"
+      fi
+    done
+  if [ $count -lt 2 ]; then
+    echoerr "The number of the active port is less than 2"
+    result=false
+    break
+  fi
+  done
+}
+
+
+#############################
+#REMOVE INSTANCE FROM THE LB#
+#############################
+remove_from_lb() {
+  local INSTANCE_NAME=$1
+  shift
+  local LB_PORTS=$@
+  for CURRENT_PORT in $LB_PORTS
+  do
+    ENDPOINT_NUMBER=$(azure vm endpoint show $INSTANCE_NAME |
+grep -E --ignore-case "LocalPort \"?$CURRENT_PORT\"?" |
+awk '{print $4}')
+    if [ -z $ENDPOINT_NUMBER ]; then
+      echo "ENDPOINT $CURRENT_PORT not present. Skipping removal..."
+      continue
+    fi
+    ENDPOINT_NAME=$(azure vm endpoint show $INSTANCE_NAME |
+grep --ignore-case "$ENDPOINT_NUMBER Name" |
+awk '{print $6}' |
+sed 's/^"\(.*\)"$/\1/')
+    azure vm endpoint delete $INSTANCE_NAME $ENDPOINT_NAME ||
+ die "Instance $INSTANCE_NAME could not be removed from load balancer, aborting."
+    echo "Instance $INSTANCE_NAME removed from load balancer, waiting $WAIT_SEC seconds"
+  done
+}
+########################
+#ADD INSTANCE TO THE LB#
+########################
+add_to_lb() {
+ local INSTANCE_NAME=$1
+ shift
+ local LB_PORTS=$@
+ local SHARED_ENDPOINT=""
+ local ENDPOINT_NAME=""
+ for CURRENT_PORT in $LB_PORTS
+ do
+   if [ "$CURRENT_PORT" == "80" ]; then
+     SHARED_ENDPOINT="HTTP-SHARED"
+     ENDPOINT_NAME="HTTP"
+   elif [ "$CURRENT_PORT" == "443" ]; then
+     SHARED_ENDPOINT="HTTPS-SHARED"
+     ENDPOINT_NAME="HTTPS"
+   fi
+   if [ -z $SHARED_ENDPOINT ]; then
+     die "Port is not one of: 80 443. Input was $LB_PORTS. Aborting..."
+   fi
+   azure vm endpoint create $INSTANCE_NAME ${CURRENT_PORT} ${CURRENT_PORT} --endpoint-name $ENDPOINT_NAME --lb-set-name $SHARED_ENDPOINT --probe-port $CURRENT_PORT --endpoint-protocol tcp
+ done
+}
+
+########################
+#GATHER AZURE INFO#####
+#######################
+retrieve_azure_info() {
+    ENDPOINT_NUMBER=$(azure vm endpoint show $INSTANCE_NAME |
+    grep --ignore-case SSH |
+    awk '{print $4}')
+    SSH_IP=$(azure vm endpoint show $INSTANCE_NAME |
+    grep -E --ignore-case "$ENDPOINT_NUMBER (Vip|virtualIPAddress)" |
+    awk '{print $6}' |
+    sed 's/^"\(.*\)"$/\1/')
+    SSH_PORT=$(azure vm endpoint show $INSTANCE_NAME |
+    grep --ignore-case "$ENDPOINT_NUMBER port" |
+    awk '{print $6}' |
+    sed 's/^"\(.*\)"$/\1/')
+
+    if [ -z "$SSH_IP" ] || [ -z "$SSH_PORT" ]
+    then
+        die "Could not determine the IP address of the instance $INSTANCE_NAME, aborting."
+    fi
+    echo "Instance $INSTANCE_NAME has IP address $SSH_IP"
+}
+
+
+########################
+##CHECK INSTANCE NAME###
+########################
+check_instance_in_VMs() {
+    local match=0
+    local CURRENT_INSTANCE=$1
+    for name in $VMs; do
+        if [[ "${CURRENT_INSTANCE}" = "$name" ]]; then
+            match=1
+            break
+        fi
+    done
+    if [[ $match = 0 ]]; then
+       die "Instance name must be one among $VMs"
+    fi
+}
+
+#########################################################################################
+#########################################################################################
+
+if [ -z "$OPERATION" ]
+then
+   echored "$0 requires one among {status|add|remove} as first parameter"
+   die "Example: $0 add azure-synd-01"
+fi
+
+if [ "${OPERATION}" != "status" ] && [ -z "${INSTANCE_NAME}" ]
+then
+    echored "$0 requires the instance NAME with add and remove as arguments."
+    die "Example: $0 add azure-synd-01"
+fi
+
+if [ "${OPERATION}" != "status" ] && [ -z "${INSTANCE_NAME}" ]
+then
+    check_instance_in_VMs "${INSTANCE_NAME}"
+fi
+
+case "$OPERATION" in
+	add)
+            retrieve_azure_info
+	          add_to_lb $INSTANCE_NAME $LB_PORTS
+            ;;
+        remove)
+            count_inservice
+            if [ "$result" != "true" ]; then
+    	      echoerr "Insufficient number of in service VMs for the endpoint. Aborting"
+              exit 1
+            fi
+            retrieve_azure_info
+            remove_from_lb $INSTANCE_NAME $LB_PORTS
+            ;;
+        status)
+           get_status
+           ;;
+        *)
+           echo "${red}Usage $0 instance_name {add|remove}${NC}"
+           exit 1
+esac
