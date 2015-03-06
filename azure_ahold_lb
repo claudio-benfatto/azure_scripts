@@ -12,6 +12,7 @@ INSTANCE_NAME=$2
 OPERATION=$1
 WAIT_SEC=20
 LB_PORTS="80 443"
+EMAIL="devops@constant.co, loic.chardonnet@constant.co"
 
 function expected_ports() {
   words=( $PORTS )
@@ -19,7 +20,7 @@ function expected_ports() {
 }
 
 function notify() {
-  echo $1 | /usr/bin/mailx -a "From: Rms Production <ubuntu@rms.foodity.com>" -s "[Ahold rms auto-publish] Notification" claudio.benfatto@constant.co
+  echo $1 | /usr/bin/mailx -a "From: Rms Production <ubuntu@rms.foodity.com>" -s "[Ahold rms auto-publish] Notification" $EMAIL
 }
 
 echored() { echo -e "${red}$@${NC}"; }
@@ -47,7 +48,7 @@ function get_status() {
     output=`azure vm endpoint list $vm`
     for port in $PORTS
       do
-         grep -E "\b\"?$port\"?\b" > /dev/null 2>&1 <<< $output
+         grep -E "\"?\b$port\b\"?" > /dev/null 2>&1 <<< "$output"
       if [ $? -eq 0 ]; then
         echogreen "------Port $port present"
       else
@@ -66,6 +67,7 @@ function count_inservice() {
   local vm
   local port
   local PORT_DISABLED
+  local output
   result=true
   vm_count=0
   echo "For vm in $VMs..."
@@ -74,10 +76,11 @@ function count_inservice() {
     echo "Current vm is $vm..."
     echo "For port in $PORTS..."
     PORT_DISABLED="false"
+    output=""
+    output=`azure vm endpoint list $vm`
     for port in $PORTS
     do
-      echo "---Current port is $port"
-      azure vm endpoint list $vm | grep -E "\b\"?$port\"?\b" > /dev/null 2>&1
+      grep -E "\"?\b$port\b\"?" > /dev/null 2>&1 <<< "$output"
       if [ ! $? -eq 0 ]; then
        PORT_DISABLED="true"
        echoerr "------Port $port not present"
@@ -112,10 +115,12 @@ remove_from_lb() {
   local INSTANCE_NAME=$1
   shift
   local LB_PORTS=$@
+  local output
+  output=`azure vm endpoint show $INSTANCE_NAME`
   for CURRENT_PORT in $LB_PORTS
   do
-    ENDPOINT_NUMBER=$(azure vm endpoint show $INSTANCE_NAME |
-grep -E --ignore-case "LocalPort \"?$CURRENT_PORT\"?" |
+    ENDPOINT_NUMBER=$( echo "$output" |
+grep -E --ignore-case "LocalPort \"?\b$CURRENT_PORT\b\"?" |
 awk '{print $4}')
 
     if [ -z "$ENDPOINT_NUMBER" ]; then
@@ -123,7 +128,7 @@ awk '{print $4}')
       continue
     fi
 
-    ENDPOINT_NAME=$(azure vm endpoint show $INSTANCE_NAME |
+    ENDPOINT_NAME=$( echo "$output" |
 grep --ignore-case "$ENDPOINT_NUMBER Name" |
 awk '{print $6}' |
 sed 's/^"\(.*\)"$/\1/')
@@ -162,17 +167,20 @@ add_to_lb() {
 #GATHER AZURE INFO#####
 #######################
 retrieve_azure_info() {
-    ENDPOINT_NUMBER=$(azure vm endpoint show $INSTANCE_NAME |
+    local output
+    output=`azure vm endpoint show $INSTANCE_NAME`
+
+    ENDPOINT_NUMBER=$( echo "$output" |
     grep --ignore-case SSH |
-    awk '{print $4}')
-    SSH_IP=$(azure vm endpoint show $INSTANCE_NAME |
+    awk '{print $4}' )
+    SSH_IP=$( echo "$output" |
     grep -E --ignore-case "$ENDPOINT_NUMBER (Vip|virtualIPAddress)" |
     awk '{print $6}' |
-    sed 's/^"\(.*\)"$/\1/')
-    SSH_PORT=$(azure vm endpoint show $INSTANCE_NAME |
+    sed 's/^"\(.*\)"$/\1/' )
+    SSH_PORT=$( echo "$output" |
     grep --ignore-case "$ENDPOINT_NUMBER port" |
     awk '{print $6}' |
-    sed 's/^"\(.*\)"$/\1/')
+    sed 's/^"\(.*\)"$/\1/' )
 
     if [ -z "$SSH_IP" ] || [ -z "$SSH_PORT" ]
     then
@@ -221,6 +229,7 @@ case "$OPERATION" in
             ;;
         remove)
             read_instance_name
+            notify "Removal request for instance $INSTANCE_NAME"
             count_inservice
             if [ "$result" != "true" ]; then
     	      echoerr "Insufficient number of in service VMs for the endpoint. Aborting"
@@ -233,5 +242,5 @@ case "$OPERATION" in
            get_status
            ;;
         *)
-           die "Usage $0 {add|remove}  instance_name | $0 status"
+           die "Usage:\n $0 {add|remove} [$VMs] \n $0 status"
 esac
