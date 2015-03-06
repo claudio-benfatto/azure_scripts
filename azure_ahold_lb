@@ -35,6 +35,7 @@ die() { echored "$@" 1>&2 ; exit 1; }
 function get_status() {
   local vm
   local port
+  local output
 
   echo "For vm in $VMs"
   for vm in $VMs
@@ -43,9 +44,10 @@ function get_status() {
     echo "####################"
     echo "VM $vm"
     echo "---For port in $PORTS..."
+    output=`azure vm endpoint list $vm`
     for port in $PORTS
       do
-        azure vm endpoint list $vm | grep -E "\b\"?$port\"?\b" > /dev/null 2>&1
+         grep -E "\b\"?$port\"?\b" > /dev/null 2>&1 <<< $output
       if [ $? -eq 0 ]; then
         echogreen "------Port $port present"
       else
