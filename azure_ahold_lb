@@ -13,6 +13,11 @@ OPERATION=$1
 WAIT_SEC=20
 LB_PORTS="80 443"
 
+function expected_ports() {
+  words=( $PORTS )
+  echo ${#words[@]}
+}
+
 function notify() {
   echo $1 | /usr/bin/mailx -a "From: Rms Production <ubuntu@rms.foodity.com>" -s "[Ahold rms auto-publish] Notification" claudio.benfatto@constant.co
 }
@@ -44,11 +49,12 @@ function get_status() {
       if [ $? -eq 0 ]; then
         echogreen "------Port $port present"
       else
-       echored "------Port $port not present for vm $vm"
+       echored "------Port $port not present"
       fi
     done
   done
 }
+
 
 ############################
 #COUNT IN SERVICE###########
@@ -57,30 +63,43 @@ function count_inservice() {
   local count=0
   local vm
   local port
+  local PORT_DISABLED
   result=true
-  echo "For port in $PORTS..."
-  for port in $PORTS
+  vm_count=0
+  echo "For vm in $VMs..."
+  for vm in $VMs
   do
-    echo "---Current port is $port"
-    count=0
-    echo "---For vm in $VMs..."
-    for vm in $VMs
+    echo "Current vm is $vm..."
+    echo "For port in $PORTS..."
+    PORT_DISABLED="false"
+    for port in $PORTS
     do
-      echo "------Current vm is $vm..."
+      echo "---Current port is $port"
       azure vm endpoint list $vm | grep -E "\b\"?$port\"?\b" > /dev/null 2>&1
-      if [ $? -eq 0 ]; then
-       count=$(($count+1))
-       echo "------Updating counter: $count"
-      else
+      if [ ! $? -eq 0 ]; then
+       PORT_DISABLED="true"
        echoerr "------Port $port not present"
+       break
+      else
+        echogreen "------Port $port OK"
       fi
     done
-  if [ $count -lt 2 ]; then
-    echoerr "The number of the active port is less than 2"
-    result=false
-    break
-  fi
+    #Check that the number of ports match the expected number of ports
+    if [ "$PORT_DISABLED" = "false" ]; then
+      vm_count=$(($vm_count+1))
+      echo "VM count updated to ${vm_count}"
+    fi
+    #If there are enough VMs in the load balancer stop counting
+    if [ $vm_count -ge $MINIMUM_ACTIVE ]; then
+      echogreen "VM count is more or equal than the minumum (${MINIMUM_ACTIVE})"
+      break
+    fi
   done
+  #Check the vm_count
+  if [ $vm_count -lt $MINIMUM_ACTIVE ]; then
+    echoerr "The number of the active vm (${vm_count}) is less than ${MINIMUM_ACTIVE}"
+    result=false
+  fi
 }
 
 
@@ -96,19 +115,22 @@ remove_from_lb() {
     ENDPOINT_NUMBER=$(azure vm endpoint show $INSTANCE_NAME |
 grep -E --ignore-case "LocalPort \"?$CURRENT_PORT\"?" |
 awk '{print $4}')
-    if [ -z $ENDPOINT_NUMBER ]; then
+
+    if [ -z "$ENDPOINT_NUMBER" ]; then
       echo "ENDPOINT $CURRENT_PORT not present. Skipping removal..."
       continue
     fi
+
     ENDPOINT_NAME=$(azure vm endpoint show $INSTANCE_NAME |
 grep --ignore-case "$ENDPOINT_NUMBER Name" |
 awk '{print $6}' |
 sed 's/^"\(.*\)"$/\1/')
     azure vm endpoint delete $INSTANCE_NAME $ENDPOINT_NAME ||
  die "Instance $INSTANCE_NAME could not be removed from load balancer, aborting."
-    echo "Instance $INSTANCE_NAME removed from load balancer, waiting $WAIT_SEC seconds"
+    echo "Instance $INSTANCE_NAME removed from load balancer"
   done
 }
+
 ########################
 #ADD INSTANCE TO THE LB#
 ########################
@@ -157,7 +179,6 @@ retrieve_azure_info() {
     echo "Instance $INSTANCE_NAME has IP address $SSH_IP"
 }
 
-
 ########################
 ##CHECK INSTANCE NAME###
 ########################
@@ -170,37 +191,34 @@ check_instance_in_VMs() {
             break
         fi
     done
-    if [[ $match = 0 ]]; then
+    if [[ $match -eq 0 ]]; then
        die "Instance name must be one among $VMs"
     fi
 }
 
-#########################################################################################
-#########################################################################################
-
-if [ -z "$OPERATION" ]
-then
-   echored "$0 requires one among {status|add|remove} as first parameter"
-   die "Example: $0 add azure-synd-01"
-fi
-
-if [ "${OPERATION}" != "status" ] && [ -z "${INSTANCE_NAME}" ]
-then
-    echored "$0 requires the instance NAME with add and remove as arguments."
-    die "Example: $0 add azure-synd-01"
-fi
-
-if [ "${OPERATION}" != "status" ] && [ -z "${INSTANCE_NAME}" ]
-then
+#########################
+####READ INSTANCE NAME###
+#########################
+read_instance_name() {
+    if [  "x${INSTANCE_NAME}" = "x" ]; then
+      echo "Enter the vm name and press [ENTER]. Possible choices: ${VMs}"
+      read INSTANCE_NAME
+    fi
     check_instance_in_VMs "${INSTANCE_NAME}"
-fi
+}
+
+################################
+############### MAIN PART ######
+################################
 
 case "$OPERATION" in
-	add)
-            retrieve_azure_info
-	          add_to_lb $INSTANCE_NAME $LB_PORTS
+	    add)
+          read_instance_name
+          retrieve_azure_info
+	        add_to_lb $INSTANCE_NAME $LB_PORTS
             ;;
         remove)
+            read_instance_name
             count_inservice
             if [ "$result" != "true" ]; then
     	      echoerr "Insufficient number of in service VMs for the endpoint. Aborting"
@@ -213,6 +231,5 @@ case "$OPERATION" in
            get_status
            ;;
         *)
-           echo "${red}Usage $0 instance_name {add|remove}${NC}"
-           exit 1
+           die "Usage $0 {add|remove}  instance_name | $0 status"
 esac
